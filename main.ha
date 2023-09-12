@@ -3,12 +3,15 @@ use io;
 use fs;
 use os;
 use strconv;
+use strings;
 use encoding::json;
 
 type invalidop = !void;
 type invalidkind = !void;
 type unknownvar = !void;
 type comperror = !(unknownvar | invalidop | invalidkind);
+
+type kinds = (str | int | bool);
 
 export fn main() void = {
 
@@ -50,14 +53,35 @@ fn compile(code: encoding::json::object) (void | io::error) = {
 		const exp = exp as (const str, const *encoding::json::value);
 
 		switch (exp.0) {
-		case "kind" => return kind(&code, *exp.1 as str);
+		case "kind" => return kind(&code, *exp.1 as str)!;
+		case "next" => return compile(*exp.1 as encoding::json::object);
 		case "location" => continue;
+		case "name" => continue;
+		case "value" => continue;
 		case => fmt::fatalf("{} not implemented", exp.0);
 		};
 	};
 };
 
+fn newlet(let_ex: *encoding::json::object) (void | io::error) = {
+	const valobj = xgetobj(let_ex, "value");
+	const kind = xgetstr(&valobj, "kind"); 
+	if(kind == "Function") return;
+	if(kind == "Call") return;
+
+	const name = xgetstr(&xgetobj(let_ex, "name"), "text");
+	switch (kind) {
+	case "Int" => fmt::printfln("int {} = {};", name, xgetint(&valobj, "value"))!;
+	case  => fmt::println("TODO")!;
+	};
+	
+
+};
+
 fn kind(code: *encoding::json::object, kd: str) (void | io::error) = {
+	const location = &xgetobj(code, "location");
+	const locstart = xgetint(location, "start");
+	const locend = xgetint(location, "end");
 	switch(kd){
 	case "Print" =>
 		fmt::print("print(")!;
@@ -68,22 +92,24 @@ fn kind(code: *encoding::json::object, kd: str) (void | io::error) = {
 	case "Int" =>
 		fmt::print(xgetint(code, "value"))!;
 	case "Binary" =>
-		// opcode(lhs, rhs, op)
-		let op = opcode(&xgetobj(code, "lhs"), 
+		// binary(lhs, rhs, op)
+		let op = binary(&xgetobj(code, "lhs"), 
 				&xgetobj(code, "rhs"), 
 				xgetstr(code, "op"));
+
 		match(op) {
 		// TODO: pretty print errors
-		case invalidop => fmt::printfln("Invalid {} operation at:")!;
+		case invalidop => fmt::errorfln("\x1b[31mInvalid operation at {}-{}", locstart, locend)!;
 		case let opstr: str => fmt::printf("\"{}\"", opstr)!;
 		case let opint: int => fmt::print(opint)!;
 		case let opbool: bool => fmt::print(opbool)!;
 		};
+	case "Let" => return newlet(code);
 	case => fmt::fatalf("Unknown kind: {}", kd);
 	};
 };
 
-fn opcode(lhs: *encoding::json::object, rhs: *encoding::json::object, op: str) (str | int | bool |  comperror) = {
+fn binary(lhs: *encoding::json::object, rhs: *encoding::json::object, op: str) (kinds | comperror) = {
 	const kind1 = xgetstr(lhs, "kind");
 	const kind2 = xgetstr(rhs, "kind");
 
@@ -93,54 +119,126 @@ fn opcode(lhs: *encoding::json::object, rhs: *encoding::json::object, op: str) (
 		case "Int" => 
 			const lv = xgetint(lhs, "value");
 			const rv = xgetint(rhs, "value");
-			switch (op) {
-			case "Add" => return lv + rv;
-			case "Sub" => return lv - rv;
-			case "Mul" => return lv * rv;
-			case "Div" => return lv / rv;
-			case "Rem" => return lv % rv;
-			case "Eq" => return lv == rv;
-			case "Neq" => return lv != rv;
-			case "Lt" => return lv < rv;
-			case "Gt" => return lv > rv;
-			case "Lte" => return lv <= rv;
-			case "Gte" => return lv >= rv;
-			case => return invalidop;
-			};
+			
+			return opcode(lv, rv, op);
 		case "Binary" =>
 			const lv = xgetint(lhs, "value");
 			const lrv = xgetobj(rhs, "lhs");
 			const rrv = xgetobj(rhs, "rhs");
-			const op2 = xgetstr(rhs, "op");
-			const rv = opcode(&lrv, &rrv, op2) as int;
-			
-			switch (op) {
-			case "Add" => return lv + rv;
-			case "Sub" => return lv - rv;
-			case "Mul" => return lv * rv;
-			case "Div" => return lv / rv;
-			case "Rem" => return lv % rv;
-			case "Eq" => return lv == rv;
-			case "Neq" => return lv != rv;
-			case "Lt" => return lv < rv;
-			case "Gt" => return lv > rv;
-			case "Lte" => return lv <= rv;
-			case "Gte" => return lv >= rv;
-			case => return invalidop;
-			};
+			const opr = xgetstr(rhs, "op");
+			const rv = binary(&lrv, &rrv, opr);
+			if(rv is comperror) return rv;
+
+			return opcode(lv, rv as kinds, op);
+
 		case "Str" =>
 			const lv = xgetint(lhs, "value");
 			const rv = xgetstr(rhs, "value");
-			switch (op) {
-			case "Add" => return fmt::asprintf("{}{}", lv, rv);
-			case => return invalidop;
-			};
-		case => return invalidkind;
+
+			return opcode(lv, rv, op);
+			
+		case => return invalidop;
 		};
-	case "Binary" => 
-		return opcode(rhs, lhs, op);
+	case "Bool" =>
+		switch(kind2) {
+		case "Binary" => 
+			const lv = xgetbool(lhs, "value");
+			const lrv = xgetobj(rhs, "lhs");
+			const rrv = xgetobj(rhs, "rhs");
+			const opr = xgetstr(rhs, "op");
+			const rv = binary(&lrv, &rrv, opr);
+			if(rv is comperror) return rv;
+
+			return opcode(lv, rv as kinds, op);
+
+		case "Bool" =>
+			const lv = xgetbool(lhs, "value");
+			const rv = xgetbool(rhs, "value");
+
+			return opcode(lv, rv, op);
+		case => return invalidop;
+		};
+	case "Binary" =>
+		const llv = xgetobj(lhs, "lhs");
+		const rlv = xgetobj(lhs, "rhs");
+		const opl = xgetstr(lhs, "op");
+		const lv = binary(&llv, &rlv, opl);
+		if(lv is comperror) return lv;
+
+		const lrv = xgetobj(rhs, "lhs");
+		const rrv = xgetobj(rhs, "rhs");
+		const opr = xgetstr(rhs, "op");
+		const rv = binary(&lrv, &rrv, opr);
+		if(rv is comperror) return rv;
+
+		return opcode(lv as kinds, rv as kinds, op);
 	case "Str" => 
-		return opcode(rhs, lhs, op);
+		switch(kind2) {
+		case "Str" =>
+			const lv = xgetstr(lhs, "value");
+			const rv = xgetstr(rhs, "value");
+			return opcode(lv, rv, op);
+		case "Int" =>
+			const lv = xgetstr(lhs, "value");
+			const rv = xgetint(rhs, "value");
+			return opcode(lv, rv, op);
+		case "Binary" => 
+			const lv = xgetstr(lhs, "value");
+			const lrv = xgetobj(rhs, "lhs");
+			const rrv = xgetobj(rhs, "rhs");
+			const opr = xgetstr(rhs, "op");
+			const rv = binary(&lrv, &rrv, opr);
+			if(rv is comperror) return rv;
+
+			return opcode(lv, rv as kinds, op);
+		case => return invalidop;
+		};
 	case => return invalidop;
 	};
 };
+fn opcode(lhs: kinds, rhs: kinds, op: str) (kinds | comperror) = {
+	switch (op) {
+	case "Add" =>
+		if(lhs is int && rhs is int) return lhs as int + rhs as int;
+		if(lhs is str && rhs is str) return strings::concat(lhs as str, rhs as str);
+		if(lhs is str && rhs is int) return fmt::asprintf("{}{}", lhs, rhs);
+		if(lhs is int && rhs is str) return fmt::asprintf("{}{}", lhs, rhs);
+		return invalidop;
+	case "Eq" =>
+		if(lhs is int && rhs is int)   return lhs as int  == rhs as int;
+		if(lhs is str && rhs is str)   return lhs as str  == rhs as str;
+		if(lhs is bool && rhs is bool) return lhs as bool == rhs as bool;
+	case "Neq" =>
+		if(lhs is int && rhs is int)   return lhs as int  != rhs as int;
+		if(lhs is str && rhs is str)   return lhs as str  != rhs as str;
+		if(lhs is bool && rhs is bool) return lhs as bool != rhs as bool;
+		return invalidop;
+	case "And" =>
+		if(lhs is bool && rhs is bool) return lhs as bool && rhs as bool;
+		return invalidop;
+	case "Or" =>
+		if(lhs is bool && rhs is bool) return lhs as bool || rhs as bool;
+		return invalidop;
+	case => 
+		if(!(lhs is int && rhs is int)) return invalidop;
+		const lhs = lhs as int;
+		const rhs = rhs as int;
+		switch (op) {
+		case "Sub" => return lhs - rhs;
+		case "Mul" => return lhs * rhs;
+		case "Div" => 
+			if(rhs == 0) return invalidop;
+			return lhs / rhs;
+		case "Rem" => return lhs % rhs;
+		case "Lt" => return lhs < rhs;
+		case "Gt" => return lhs > rhs;
+		case "Lte" => return lhs <= rhs;
+		case "Gte" => return lhs >= rhs;
+		case => return invalidop;
+		};
+	};
+
+	return invalidop;
+};
+
+

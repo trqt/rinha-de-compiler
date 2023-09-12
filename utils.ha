@@ -40,4 +40,17 @@ fn xgetint(value: *encoding::json::object, s: str) int = {
 	return ret: int;
 };
 
+fn xgetbool(value: *encoding::json::object, s: str) bool = {
+	const ret = encoding::json::get(value, s);
+
+	if(ret is void) {
+		fmt::fatalf("Morri bool");
+	};
+
+	const ret = ret as *encoding::json::value;
+	const ret = *ret as bool;
+
+	return ret;
+};
+
 
